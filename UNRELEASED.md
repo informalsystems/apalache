@@ -20,6 +20,7 @@
 * Type checker: always treating `<<...>>` in `UNCHANGED <<...>>` as a tuple, see #660
 * Type checker: handling the general case of EXCEPT, see #617
 * Preprocessing: handling the general case of EXCEPT, see #647
+* Intermediate representation: implemented type-aware builder,  see #675
 
 ### Changed
 

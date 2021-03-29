@@ -86,7 +86,7 @@ case class OperEx(oper: TlaOper, args: TlaEx*)(implicit typeTag: TypeTag) extend
     }
   }
 
-  override def withTag(newTypeTag: TypeTag): TlaEx = {
+  override def withTag(newTypeTag: TypeTag): OperEx = {
     OperEx(oper, args: _*)(newTypeTag)
   }
 }

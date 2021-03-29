@@ -113,7 +113,7 @@ object TlaFunOper {
    * </p>
    */
   object recFunDef extends TlaFunOper {
-    override def arity: OperArity = new OperArity(_ >= 3)
+    override def arity: OperArity = new OperArity(k => k >= 3 && k % 2 == 1)
     override def name: String = "rec-fun-def"
     override def precedence: (Int, Int) = (100, 100) // as the operator declaration
   }
