@@ -1,5 +1,6 @@
 package at.forsyte.apalache.tla.bmcmt
 
+import at.forsyte.apalache.tla.bmcmt.Checker.Error
 import at.forsyte.apalache.tla.bmcmt.caches.{EqCache, EqCacheSnapshot}
 import at.forsyte.apalache.tla.bmcmt.implicitConversions._
 import at.forsyte.apalache.tla.bmcmt.rewriter.{ConstSimplifierForSmt, Recoverable}
@@ -426,21 +427,34 @@ class LazyEquality(rewriter: SymbStateRewriter)
     // the intersection of the keys, as we can assume that the static domains are equal
     val commonKeys = leftType.fields.keySet.intersect(rightType.fields.keySet)
     var newState = state
+
     def keyEq(key: String): TlaEx = {
       val leftIndex = leftType.fields.keySet.toList.indexOf(key)
       val rightIndex = rightType.fields.keySet.toList.indexOf(key)
-      val leftElem = leftElems(leftIndex)
-      val rightElem = rightElems(rightIndex)
-      newState = cacheOneEqConstraint(newState, leftElem, rightElem)
-      val (newArena, keyCell) = rewriter.strValueCache.getOrCreate(newState.arena, key)
-      newState = newState.setArena(newArena)
-      // it is safe to use in directly since:
-      // (1) the record types coincide,
-      // (2) record constructors use RecordDomainCache,
-      // (3) and CherryPick uses pickRecordDomain
-      val membershipTest = tla.in(keyCell.toNameEx, leftDom.toNameEx)
-      //      newState = rewriter.rewriteUntilDone(newState.setRex(tla.in(keyCell, leftDom))) // the old way
-      tla.or(tla.not(membershipTest), safeEq(leftElem, rightElem))
+
+      // Our typing rules on records allow records with a subset of the fields in a type
+      // which means the function from fields in a record type to elements in an instance
+      // of that type are partial.
+      val leftElemOpt : Option[ArenaCell] = leftElems.lift(leftIndex)
+      val rightElemOpt :  Option[ArenaCell] = rightElems.lift(rightIndex)
+
+      (leftElemOpt, rightElemOpt) match {
+        // Neither record has the key indicated by its type
+        case (None, None) => tla.bool(true)
+        case (Some(leftElem), Some(rightElem)) =>  {
+          newState = cacheOneEqConstraint(newState, leftElem, rightElem)
+          val (newArena, keyCell) = rewriter.strValueCache.getOrCreate(newState.arena, key)
+          newState = newState.setArena(newArena)
+          // it is safe to use in directly since:
+          // (1) the record types coincide,
+          // (2) record constructors use RecordDomainCache,
+          // (3) and CherryPick uses pickRecordDomain
+          val membershipTest = tla.in(keyCell.toNameEx, leftDom.toNameEx)
+          //      newState = rewriter.rewriteUntilDone(newState.setRex(tla.in(keyCell, leftDom))) // the old way
+          tla.or(tla.not(membershipTest), safeEq(leftElem, rightElem))
+        }
+        case (Some(_), None) | (None, Some(_)) => tla.bool(false)
+      }
     }
 
     newState = cacheOneEqConstraint(newState, leftDom, rightDom)
