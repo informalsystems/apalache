@@ -82,21 +82,22 @@ object DefaultType1Parser extends Parsers with Type1Parser {
 
   // functions are tricky, as they start as other expressions, so we have to distinguish them by RIGHT_ARROW
   private def function: Parser[TlaType1] = {
-    (noFunExpr ~ RIGHT_ARROW() ~ typeExpr) ^^ {
-      case source ~ _ ~ target => FunT1(source, target)
+    (noFunExpr ~ RIGHT_ARROW() ~ typeExpr) ^^ { case source ~ _ ~ target =>
+      FunT1(source, target)
     }
   }
 
   private def operator: Parser[TlaType1] = {
-    (operatorArgs ~ DOUBLE_RIGHT_ARROW() ~ typeExpr) ^^ {
-      case args ~ _ ~ result => OperT1(args, result)
+    (operatorArgs ~ DOUBLE_RIGHT_ARROW() ~ typeExpr) ^^ { case args ~ _ ~ result =>
+      OperT1(args, result)
     }
   }
 
   // Operator arguments can be of the form (), (type), or (type, ..., type)
   private def operatorArgs: Parser[List[TlaType1]] = {
     (LPAREN() ~ repsep(typeExpr, COMMA()) ~ RPAREN() | noFunExpr) ^^ {
-      case _ ~ list ~ _ => list.asInstanceOf[List[TlaType1]] // No idea why this cast is needed :(
+      case _ ~ list ~ _ =>
+        list.asInstanceOf[List[TlaType1]] // No idea why this cast is needed :(
       case typ: TlaType1 => List(typ)
     }
   }
