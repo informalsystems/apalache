@@ -64,36 +64,48 @@ object DefaultType1Parser extends Parsers with Type1Parser {
   }
 
   private def typeExpr: Parser[TlaType1] = {
-    // functions are tricky, as they start as other expressions, so we have to distinguish them by RIGHT_ARROW
-    (noFunExpr ~ opt((RIGHT_ARROW() | DOUBLE_RIGHT_ARROW()) ~ typeExpr)) ^^ {
-      case (lhs :: Nil) ~ Some(RIGHT_ARROW() ~ rhs)   => FunT1(lhs, rhs)
-      case (lhs :: Nil) ~ None                        => lhs
-      case args ~ Some(DOUBLE_RIGHT_ARROW() ~ result) => OperT1(args, result)
-    }
+    (operator | function | noFunExpr)
   }
 
   // A type expression. We wrap it with a list, as (type, ..., type) may start an operator type
-  private def noFunExpr: Parser[List[TlaType1]] = {
+  private def noFunExpr: Parser[TlaType1] = {
     (INT() | REAL() | BOOL() | STR() | typeVar | typeConst
       | set | seq | tuple | sparseTuple
       | record | parenExpr) ^^ {
-      case INT()        => List(IntT1())
-      case REAL()       => List(RealT1())
-      case BOOL()       => List(BoolT1())
-      case STR()        => List(StrT1())
-      case tt: TlaType1 => List(tt)
-      case lst: List[TlaType1] =>
-        lst
+      case INT()        => IntT1()
+      case REAL()       => RealT1()
+      case BOOL()       => BoolT1()
+      case STR()        => StrT1()
+      case tt: TlaType1 => tt
     }
   }
 
-  // A type or partial type in parenthesis.
-  // We can have: (), (type), or (type, ..., type). All of them work as a left-hand side of an operator type.
-  // Additionally, (type) may just wrap a type such as in (A -> B) -> C.
-  // Thus, return a list here, and resolve it in the rules above.
-  private def parenExpr: Parser[List[TlaType1]] = {
-    (LPAREN() ~ repsep(typeExpr, COMMA()) ~ RPAREN()) ^^ { case _ ~ list ~ _ =>
-      list
+  // functions are tricky, as they start as other expressions, so we have to distinguish them by RIGHT_ARROW
+  private def function: Parser[TlaType1] = {
+    (noFunExpr ~ RIGHT_ARROW() ~ typeExpr) ^^ {
+      case source ~ _ ~ target => FunT1(source, target)
+    }
+  }
+
+  private def operator: Parser[TlaType1] = {
+    (operatorArgs ~ DOUBLE_RIGHT_ARROW() ~ typeExpr) ^^ {
+      case args ~ _ ~ result => OperT1(args, result)
+    }
+  }
+
+  // Operator arguments can be of the form (), (type), or (type, ..., type)
+  private def operatorArgs: Parser[List[TlaType1]] = {
+    (LPAREN() ~ repsep(typeExpr, COMMA()) ~ RPAREN() | noFunExpr) ^^ {
+      case _ ~ list ~ _ => list.asInstanceOf[List[TlaType1]] // No idea why this cast is needed :(
+      case typ: TlaType1 => List(typ)
+    }
+  }
+
+  // A type in parenthesis.
+  // Parens may be used to wrap a type, such as in (A -> B) -> C.
+  private def parenExpr: Parser[TlaType1] = {
+    (LPAREN() ~ typeExpr ~ RPAREN()) ^^ { case _ ~ typ ~ _ =>
+      typ
     }
   }
 
