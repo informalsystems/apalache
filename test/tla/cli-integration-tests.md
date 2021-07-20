@@ -1794,6 +1794,22 @@ Typing input error: Parser error in type annotation of Op: '=>' expected but -> 
 EXITCODE: ERROR (255)
 ```
 
+### typecheck bug #832
+
+Unhandled exception thrown due to incorrect annotation of a tuple return
+type.
+
+See https://github.com/informalsystems/apalache/issues/832
+
+```sh
+$ apalache-mc typecheck Bug832.tla | sed 's/[IEW]@.*//'
+...
+Parsing error in the type annotation:  () => (Bool, Bool)
+Typing input error: Parser error in type annotation of View1: '->' expected but ) found
+...
+EXITCODE: ERROR (255)
+```
+
 ## Running the config command
 
 ### config --enable-stats=false
