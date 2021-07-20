@@ -1788,9 +1788,10 @@ See https://github.com/informalsystems/apalache/issues/860
 ```sh
 $ apalache-mc typecheck Bug860.tla | sed 's/[IEW]@.*//'
 ...
-Type checker [OK]
+Parsing error in the type annotation:  (Int, Int) -> Bool
+Typing input error: Parser error in type annotation of Op: '=>' expected but -> found
 ...
-EXITCODE: OK
+EXITCODE: ERROR (255)
 ```
 
 ## Running the config command
