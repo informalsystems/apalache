@@ -34,8 +34,12 @@ class Quint(quintOutput: QuintOutput) {
   private val table = quintOutput.table
   private val types = quintOutput.types
 
-  // A `NullaryOpReader[A]` is a computation producing values of type `A` that
-  // can read from a set of strings.
+  // The special name used by compiled quint specs for the initialization predicate
+  private val quintInitName = "q::init"
+
+  // Stores contextual data needed while performing the conversion
+  //
+  // `nullarOps`:
   //
   // The set of strings records the names of the nullary operators that are
   // in scope for the computation. This is required because TLA operator taking no
@@ -52,7 +56,27 @@ class Quint(quintOutput: QuintOutput) {
   // to values, we need to track the nullary operator in scope. Use of the
   // reader monad lets us express computations in a context with set of names
   // accumulated as scopes are nested, but not shared between unrelated scopes.
-  private type NullaryOpReader[A] = Reader[Set[String], A]
+  //
+  // `isInit`:
+  //
+  // This is true if the declaration being converted is the init predicate of
+  // the quint spec. We need to track this so we can construct proper equalities
+  // for state variables in the init: init setting state variables should be an
+  // equality, but in any other operator it should be an assignment.
+  case class Context(
+      nullaryOps: Set[String],
+      isInit: Boolean) {
+
+    def addNullaryOpName(n: String): Context = this.copy(nullaryOps + n)
+  }
+
+  object Context {
+    def empty: Context = Context(Set(), false)
+  }
+
+  // A `ContextReader[A]` is a computation producing values of type `A` that
+  // can read from the `Context`
+  private type ContextReader[A] = Reader[Context, A]
 
   // Find the type for an id via the lookup table provided in the quint output
   private def getTypeFromLookupTable(id: BigInt): Try[QuintType] = {
@@ -82,7 +106,7 @@ class Quint(quintOutput: QuintOutput) {
   // operators that take parameters, but these require different constructs
   // in Apalache's IR. Thus, we need to decompose the parts of a QuintLambda
   // for two different purposes.
-  private val lambdaBodyAndParams: QuintLambda => NullaryOpReader[(TBuilderInstruction, Seq[(OperParam, TlaType1)], TlaType1)] = {
+  private val lambdaBodyAndParams: QuintLambda => ContextReader[(TBuilderInstruction, Seq[(OperParam, TlaType1)], TlaType1)] = {
     case ex @ QuintLambda(id, paramNames, _, body) =>
       val (quintParamTypes, quintResType) = types(id).typ match {
         case QuintOperT(types, resType) => (types, resType)
@@ -108,7 +132,7 @@ class Quint(quintOutput: QuintOutput) {
 
   // The following *App operators are helpers to factor out building operator applications
   // and the related error handling for operators of different arities.
-  private val unaryApp: (String, T => T) => Seq[QuintEx] => NullaryOpReader[T] =
+  private val unaryApp: (String, T => T) => Seq[QuintEx] => ContextReader[T] =
     (op, tlaBuilder) => {
       case Seq(a) =>
         for {
@@ -117,7 +141,7 @@ class Quint(quintOutput: QuintOutput) {
       case tooManyArgs => throwOperatorArityError(op, "unary", tooManyArgs)
     }
 
-  private val binaryApp: (String, (T, T) => T) => Seq[QuintEx] => NullaryOpReader[T] =
+  private val binaryApp: (String, (T, T) => T) => Seq[QuintEx] => ContextReader[T] =
     (op, tlaBuilder) => {
       case Seq(a, b) =>
         for {
@@ -127,7 +151,7 @@ class Quint(quintOutput: QuintOutput) {
       case tooManyArgs => throwOperatorArityError(op, "binary", tooManyArgs)
     }
 
-  private val ternaryApp: (String, (T, T, T) => T) => Seq[QuintEx] => NullaryOpReader[T] =
+  private val ternaryApp: (String, (T, T, T) => T) => Seq[QuintEx] => ContextReader[T] =
     (op, builder) => {
       case Seq(a, b, c) =>
         for {
@@ -139,7 +163,7 @@ class Quint(quintOutput: QuintOutput) {
     }
 
   // no opName needed since we can't hit an arity error
-  private val variadicApp: (Seq[T] => T) => Seq[QuintEx] => NullaryOpReader[T] =
+  private val variadicApp: (Seq[T] => T) => Seq[QuintEx] => ContextReader[T] =
     tlaBuilder => args => args.toList.traverse(tlaExpression).map(tlaBuilder)
 
   // A binding operator is an operator that involves binding a name to a referent within a scope.
@@ -161,7 +185,7 @@ class Quint(quintOutput: QuintOutput) {
   //
   // The combinators return a function that takes a Seq of quint expressions to a tla builder instruction,
   // performing all needed validation and extraction.
-  private val binaryBindingApp: (String, (T, T, T) => T) => Seq[QuintEx] => NullaryOpReader[T] = {
+  private val binaryBindingApp: (String, (T, T, T) => T) => Seq[QuintEx] => ContextReader[T] = {
     // Multi argument bindings must be wrapped in a tuple
     // See https://github.com/informalsystems/apalache/issues/2292
     val wrapArgs: Seq[T] => T = {
@@ -225,7 +249,7 @@ class Quint(quintOutput: QuintOutput) {
 
   private object MkTla {
     // MkTla gathers non-trivial conversion functions from quint args to TLA builder instructions
-    type Converter = Seq[QuintEx] => NullaryOpReader[TBuilderInstruction]
+    type Converter = Seq[QuintEx] => ContextReader[TBuilderInstruction]
 
     def setEnumeration(elementType: QuintType): Converter =
       variadicApp {
@@ -469,6 +493,24 @@ class Quint(quintOutput: QuintOutput) {
         case Some(default) => tla.caseOther(default, casesInstructions: _*)
       }
     }
+
+    def assign: Converter = {
+      case Seq(variable, value) =>
+        // Read from the context to see if we are in the init predicate
+        Reader((ctx: Context) => ctx.isInit).flatMap(isInit =>
+          for {
+            tlaVariable <- tlaExpression(variable)
+            tlaValue <- tlaExpression(value)
+          } yield
+            if (isInit) {
+              // If we are in the init predicate, we just have an equality
+              tla.eql(tlaVariable, tlaValue)
+            } else {
+              // Otherwise, we have an assignment
+              tla.assign(tla.prime(tlaVariable), tlaValue)
+            })
+      case tooManyArgs => throwOperatorArityError("assign", "binary", tooManyArgs)
+    }
   }
 
   // Increments the TLA expression (as a TBuilderInstruction), which is assumed
@@ -478,172 +520,171 @@ class Quint(quintOutput: QuintOutput) {
   // due to the fact that quint indexing is 0-based but TLA indexing is 1-based.
   private val incrTla: T => T = tlaEx => tla.plus(tlaEx, tla.int(1))
 
-  private val tlaApplication: QuintApp => NullaryOpReader[TBuilderInstruction] = {
-    case QuintApp(id, opName, quintArgs) =>
-      val applicationBuilder: Seq[QuintEx] => NullaryOpReader[TBuilderInstruction] = opName match {
-        // First we check for application of builtin operators
+  private val tlaApplication: QuintApp => ContextReader[TBuilderInstruction] = { case QuintApp(id, opName, quintArgs) =>
+    val applicationBuilder: Seq[QuintEx] => ContextReader[TBuilderInstruction] = opName match {
+      // First we check for application of builtin operators
 
-        // Illegal builtins
-        // We expect that these builins will be eliminated in earlier stages
-        // of the translation (e.g., inside special forms like `nondet`) or
-        // via rewrites in quint.
-        case "oneOf" =>
-          // See https://github.com/informalsystems/apalache/issues/2774
-          throw new QuintIRParseError(
-              s"`oneOf` can only occur as the principle operator of a `nondet` declaration: `oneOf` operator with id ${id} applied to ${quintArgs}")
+      // Illegal builtins
+      // We expect that these builins will be eliminated in earlier stages
+      // of the translation (e.g., inside special forms like `nondet`) or
+      // via rewrites in quint.
+      case "oneOf" =>
+        // See https://github.com/informalsystems/apalache/issues/2774
+        throw new QuintIRParseError(
+            s"`oneOf` can only occur as the principle operator of a `nondet` declaration: `oneOf` operator with id ${id} applied to ${quintArgs}")
 
-        // Booleans
-        case "eq"      => binaryApp(opName, tla.eql)
-        case "neq"     => binaryApp(opName, tla.neql)
-        case "iff"     => binaryApp(opName, tla.equiv)
-        case "implies" => binaryApp(opName, tla.impl)
-        case "not"     => unaryApp(opName, tla.not)
-        case "and"     => variadicApp(args => tla.and(args: _*))
-        case "or"      => variadicApp(args => tla.or(args: _*))
+      // Booleans
+      case "eq"      => binaryApp(opName, tla.eql)
+      case "neq"     => binaryApp(opName, tla.neql)
+      case "iff"     => binaryApp(opName, tla.equiv)
+      case "implies" => binaryApp(opName, tla.impl)
+      case "not"     => unaryApp(opName, tla.not)
+      case "and"     => variadicApp(args => tla.and(args: _*))
+      case "or"      => variadicApp(args => tla.or(args: _*))
 
-        // Integers
-        case "iadd"    => binaryApp(opName, tla.plus)
-        case "isub"    => binaryApp(opName, tla.minus)
-        case "imul"    => binaryApp(opName, tla.mult)
-        case "idiv"    => binaryApp(opName, tla.div)
-        case "imod"    => binaryApp(opName, tla.mod)
-        case "ipow"    => binaryApp(opName, tla.exp)
-        case "ilt"     => binaryApp(opName, tla.lt)
-        case "igt"     => binaryApp(opName, tla.gt)
-        case "ilte"    => binaryApp(opName, tla.le)
-        case "igte"    => binaryApp(opName, tla.ge)
-        case "iuminus" => unaryApp(opName, tla.uminus)
+      // Integers
+      case "iadd"    => binaryApp(opName, tla.plus)
+      case "isub"    => binaryApp(opName, tla.minus)
+      case "imul"    => binaryApp(opName, tla.mult)
+      case "idiv"    => binaryApp(opName, tla.div)
+      case "imod"    => binaryApp(opName, tla.mod)
+      case "ipow"    => binaryApp(opName, tla.exp)
+      case "ilt"     => binaryApp(opName, tla.lt)
+      case "igt"     => binaryApp(opName, tla.gt)
+      case "ilte"    => binaryApp(opName, tla.le)
+      case "igte"    => binaryApp(opName, tla.ge)
+      case "iuminus" => unaryApp(opName, tla.uminus)
 
-        // Sets
-        case "Set" =>
-          types(id).typ match {
-            case QuintSetT(t) => MkTla.setEnumeration(t)
-            case invalidType  => throw new QuintIRParseError(s"Set with id ${id} has invalid type ${invalidType}")
-          }
-        case "exists"    => binaryBindingApp(opName, tla.exists)
-        case "forall"    => binaryBindingApp(opName, tla.forall)
-        case "in"        => binaryApp(opName, tla.in)
-        case "contains"  => binaryApp(opName, (set, elem) => tla.in(elem, set))
-        case "notin"     => binaryApp(opName, tla.notin)
-        case "union"     => binaryApp(opName, tla.cup)
-        case "intersect" => binaryApp(opName, tla.cap)
-        case "exclude"   => binaryApp(opName, tla.setminus)
-        case "subseteq"  => binaryApp(opName, tla.subseteq)
-        case "filter"    => binaryBindingApp(opName, tla.filter)
-        case "map"       => binaryBindingApp(opName, (name, set, expr) => tla.map(expr, (name, set)))
-        case "fold"      => ternaryApp(opName, (set, init, op) => tla.foldSet(op, init, set))
-        case "powerset"  => unaryApp(opName, tla.powSet)
-        case "flatten"   => unaryApp(opName, tla.union)
-        case "allLists"  => unaryApp(opName, tla.seqSet)
-        case "isFinite"  => unaryApp(opName, tla.isFiniteSet)
-        case "size"      => unaryApp(opName, tla.cardinality)
-        case "to"        => binaryApp(opName, tla.dotdot)
-        case "chooseSome" => {
-          // `chooseSome(S)` is translated to `CHOOSE x \in S: TRUE`
-          // and to construct the latter we need to generate a unique
-          // variable name for `x` and find the expected type
-          val elementType = typeConv.convert(types(id).typ)
-          val varName = tla.name(nameGen.uniqueVarName(), elementType)
-          unaryApp(opName, tla.choose(varName, _, tla.bool(true)))
+      // Sets
+      case "Set" =>
+        types(id).typ match {
+          case QuintSetT(t) => MkTla.setEnumeration(t)
+          case invalidType  => throw new QuintIRParseError(s"Set with id ${id} has invalid type ${invalidType}")
         }
-
-        // Lists (Sequences)
-        case "List"      => MkTla.listConstruction(id)
-        case "append"    => binaryApp(opName, tla.append)
-        case "concat"    => binaryApp(opName, tla.concat)
-        case "head"      => unaryApp(opName, tla.head)
-        case "tail"      => unaryApp(opName, tla.tail)
-        case "length"    => unaryApp(opName, tla.len)
-        case "indices"   => MkTla.indices(opName)
-        case "foldl"     => ternaryApp(opName, (seq, init, op) => tla.foldSeq(op, init, seq))
-        case "nth"       => binaryApp(opName, (seq, idx) => tla.app(seq, incrTla(idx)))
-        case "replaceAt" => ternaryApp(opName, (seq, idx, x) => tla.except(seq, incrTla(idx), x))
-        case "slice"     => ternaryApp(opName, (seq, from, to) => tla.subseq(seq, incrTla(from), incrTla(to)))
-        case "select"    => MkTla.selectSeq(opName, typeConv.convert(types(id).typ))
-        case "range" =>
-          binaryApp(opName,
-              (low, high) => {
-                val iParam = tla.param(nameGen.uniqueVarName(), IntT1)
-                val i = tla.name(iParam._1.name, iParam._2)
-                tla.mkSeqConst(tla.minus(high, low),
-                    tla.lambda(nameGen.uniqueLambdaName(), tla.minus(tla.plus(low, i), tla.int(1)), iParam))
-              })
-
-        // Tuples
-        case "Tup" => variadicApp(args => tla.tuple(args: _*))
-        // product projection is just function application on TLA
-        case "item"   => binaryApp(opName, tla.app)
-        case "tuples" => variadicApp(tla.times)
-
-        // Records
-        case "Rec" =>
-          val rowVar = types(id).typ match {
-            case r: QuintRecordT => r.rowVar
-            case invalidType =>
-              throw new QuintIRParseError(s"Invalid type given for Rec operator application ${invalidType}")
-          }
-          MkTla.record(rowVar)
-        case "field"      => binaryApp(opName, tla.app)
-        case "fieldNames" => unaryApp(opName, tla.dom)
-        case "with"       => ternaryApp(opName, tla.except)
-
-        // Sum types
-        case "variant"      => MkTla.variant(types(id).typ)
-        case "matchVariant" => MkTla.matchVariant
-
-        // Maps (functions)
-        // Map is variadic on n tuples, so build a set of these tuple args
-        // before converting the resulting set of tuples to a function.
-        case "Map" =>
-          quintArgs =>
-            types(id).typ match {
-              case QuintFunT(dom, codom) =>
-                MkTla.setEnumeration(QuintType.QuintTupleT.ofTypes(dom, codom))(quintArgs).map(tla.setAsFun)
-              case invalidType => throw new QuintIRParseError(s"Map with id ${id} has invalid type ${invalidType}")
-            }
-        case "get"       => binaryApp(opName, tla.app)
-        case "keys"      => unaryApp(opName, tla.dom)
-        case "setToMap"  => unaryApp(opName, tla.setAsFun)
-        case "setOfMaps" => binaryApp(opName, tla.funSet)
-        case "set"       => ternaryApp(opName, tla.except)
-        case "mapBy"     => binaryBindingApp(opName, (name, set, expr) => tla.funDef(expr, (name, set)))
-        case "setBy"     => MkTla.exceptWithUpdate(opName, id)
-        case "put"       => MkTla.extendFunction(opName)
-
-        // Action operators
-        case "assign"     => binaryApp(opName, (lhs, rhs) => tla.assign(tla.prime(lhs), rhs))
-        case "actionAll"  => variadicApp(args => tla.and(args: _*))
-        case "actionAny"  => variadicApp(args => tla.or(args: _*))
-        case "assert"     => unaryApp(opName, identity) // `assert` does not have side-effects in Apalache
-        case "fail"       => unaryApp(opName, tla.not)
-        case "next"       => unaryApp(opName, tla.prime)
-        case "orKeep"     => binaryApp(opName, tla.stutt)
-        case "mustChange" => binaryApp(opName, tla.nostutt)
-        case "enabled"    => unaryApp(opName, tla.enabled)
-        case "then"       => binaryApp(opName, tla.comp)
-        case "repeated"   => throw new QuintIRParseError("Operator 'repeated' is not supported")
-
-        // Temporal operators
-        case "always"     => unaryApp(opName, tla.box)
-        case "eventually" => unaryApp(opName, tla.diamond)
-        case "weakFair"   => binaryApp(opName, (action, vars) => tla.WF(vars, action))
-        case "strongFair" => binaryApp(opName, (action, vars) => tla.SF(vars, action))
-
-        case "ite" => ternaryApp(opName, tla.ite)
-
-        // Otherwise, the applied operator is defined, and not a builtin
-        case definedOpName => { args =>
-          val quintType = getTypeFromLookupTable(id).recoverWith { case err: QuintIRParseError =>
-            Failure(new QuintIRParseError(
-                    s"While converting operator application of defined operator '${definedOpName}' to arguments ${args}: ${err
-                    .getMessage()}"))
-          }.get
-          val operType = typeConv.convert(quintType)
-          val oper = tla.name(definedOpName, operType)
-          args.toList.traverse(tlaExpression).map(tlaArgs => tla.appOp(oper, tlaArgs: _*))
-        }
+      case "exists"    => binaryBindingApp(opName, tla.exists)
+      case "forall"    => binaryBindingApp(opName, tla.forall)
+      case "in"        => binaryApp(opName, tla.in)
+      case "contains"  => binaryApp(opName, (set, elem) => tla.in(elem, set))
+      case "notin"     => binaryApp(opName, tla.notin)
+      case "union"     => binaryApp(opName, tla.cup)
+      case "intersect" => binaryApp(opName, tla.cap)
+      case "exclude"   => binaryApp(opName, tla.setminus)
+      case "subseteq"  => binaryApp(opName, tla.subseteq)
+      case "filter"    => binaryBindingApp(opName, tla.filter)
+      case "map"       => binaryBindingApp(opName, (name, set, expr) => tla.map(expr, (name, set)))
+      case "fold"      => ternaryApp(opName, (set, init, op) => tla.foldSet(op, init, set))
+      case "powerset"  => unaryApp(opName, tla.powSet)
+      case "flatten"   => unaryApp(opName, tla.union)
+      case "allLists"  => unaryApp(opName, tla.seqSet)
+      case "isFinite"  => unaryApp(opName, tla.isFiniteSet)
+      case "size"      => unaryApp(opName, tla.cardinality)
+      case "to"        => binaryApp(opName, tla.dotdot)
+      case "chooseSome" => {
+        // `chooseSome(S)` is translated to `CHOOSE x \in S: TRUE`
+        // and to construct the latter we need to generate a unique
+        // variable name for `x` and find the expected type
+        val elementType = typeConv.convert(types(id).typ)
+        val varName = tla.name(nameGen.uniqueVarName(), elementType)
+        unaryApp(opName, tla.choose(varName, _, tla.bool(true)))
       }
-      applicationBuilder(quintArgs)
+
+      // Lists (Sequences)
+      case "List"      => MkTla.listConstruction(id)
+      case "append"    => binaryApp(opName, tla.append)
+      case "concat"    => binaryApp(opName, tla.concat)
+      case "head"      => unaryApp(opName, tla.head)
+      case "tail"      => unaryApp(opName, tla.tail)
+      case "length"    => unaryApp(opName, tla.len)
+      case "indices"   => MkTla.indices(opName)
+      case "foldl"     => ternaryApp(opName, (seq, init, op) => tla.foldSeq(op, init, seq))
+      case "nth"       => binaryApp(opName, (seq, idx) => tla.app(seq, incrTla(idx)))
+      case "replaceAt" => ternaryApp(opName, (seq, idx, x) => tla.except(seq, incrTla(idx), x))
+      case "slice"     => ternaryApp(opName, (seq, from, to) => tla.subseq(seq, incrTla(from), incrTla(to)))
+      case "select"    => MkTla.selectSeq(opName, typeConv.convert(types(id).typ))
+      case "range" =>
+        binaryApp(opName,
+            (low, high) => {
+              val iParam = tla.param(nameGen.uniqueVarName(), IntT1)
+              val i = tla.name(iParam._1.name, iParam._2)
+              tla.mkSeqConst(tla.minus(high, low),
+                  tla.lambda(nameGen.uniqueLambdaName(), tla.minus(tla.plus(low, i), tla.int(1)), iParam))
+            })
+
+      // Tuples
+      case "Tup" => variadicApp(args => tla.tuple(args: _*))
+      // product projection is just function application on TLA
+      case "item"   => binaryApp(opName, tla.app)
+      case "tuples" => variadicApp(tla.times)
+
+      // Records
+      case "Rec" =>
+        val rowVar = types(id).typ match {
+          case r: QuintRecordT => r.rowVar
+          case invalidType =>
+            throw new QuintIRParseError(s"Invalid type given for Rec operator application ${invalidType}")
+        }
+        MkTla.record(rowVar)
+      case "field"      => binaryApp(opName, tla.app)
+      case "fieldNames" => unaryApp(opName, tla.dom)
+      case "with"       => ternaryApp(opName, tla.except)
+
+      // Sum types
+      case "variant"      => MkTla.variant(types(id).typ)
+      case "matchVariant" => MkTla.matchVariant
+
+      // Maps (functions)
+      // Map is variadic on n tuples, so build a set of these tuple args
+      // before converting the resulting set of tuples to a function.
+      case "Map" =>
+        quintArgs =>
+          types(id).typ match {
+            case QuintFunT(dom, codom) =>
+              MkTla.setEnumeration(QuintType.QuintTupleT.ofTypes(dom, codom))(quintArgs).map(tla.setAsFun)
+            case invalidType => throw new QuintIRParseError(s"Map with id ${id} has invalid type ${invalidType}")
+          }
+      case "get"       => binaryApp(opName, tla.app)
+      case "keys"      => unaryApp(opName, tla.dom)
+      case "setToMap"  => unaryApp(opName, tla.setAsFun)
+      case "setOfMaps" => binaryApp(opName, tla.funSet)
+      case "set"       => ternaryApp(opName, tla.except)
+      case "mapBy"     => binaryBindingApp(opName, (name, set, expr) => tla.funDef(expr, (name, set)))
+      case "setBy"     => MkTla.exceptWithUpdate(opName, id)
+      case "put"       => MkTla.extendFunction(opName)
+
+      // Action operators
+      case "assign"     => MkTla.assign
+      case "actionAll"  => variadicApp(args => tla.and(args: _*))
+      case "actionAny"  => variadicApp(args => tla.or(args: _*))
+      case "assert"     => unaryApp(opName, identity) // `assert` does not have side-effects in Apalache
+      case "fail"       => unaryApp(opName, tla.not)
+      case "next"       => unaryApp(opName, tla.prime)
+      case "orKeep"     => binaryApp(opName, tla.stutt)
+      case "mustChange" => binaryApp(opName, tla.nostutt)
+      case "enabled"    => unaryApp(opName, tla.enabled)
+      case "then"       => binaryApp(opName, tla.comp)
+      case "repeated"   => throw new QuintIRParseError("Operator 'repeated' is not supported")
+
+      // Temporal operators
+      case "always"     => unaryApp(opName, tla.box)
+      case "eventually" => unaryApp(opName, tla.diamond)
+      case "weakFair"   => binaryApp(opName, (action, vars) => tla.WF(vars, action))
+      case "strongFair" => binaryApp(opName, (action, vars) => tla.SF(vars, action))
+
+      case "ite" => ternaryApp(opName, tla.ite)
+
+      // Otherwise, the applied operator is defined, and not a builtin
+      case definedOpName => { args =>
+        val quintType = getTypeFromLookupTable(id).recoverWith { case err: QuintIRParseError =>
+          Failure(new QuintIRParseError(
+                  s"While converting operator application of defined operator '${definedOpName}' to arguments ${args}: ${err
+                  .getMessage()}"))
+        }.get
+        val operType = typeConv.convert(quintType)
+        val oper = tla.name(definedOpName, operType)
+        args.toList.traverse(tlaExpression).map(tlaArgs => tla.appOp(oper, tlaArgs: _*))
+      }
+    }
+    applicationBuilder(quintArgs)
   }
 
   // Convert Quint's nondet variable binding
@@ -651,7 +692,7 @@ class Quint(quintOutput: QuintOutput) {
   //   val nondet name = oneOf(domain); scope
   //   ~~>
   //   \E name \in domain: scope
-  private val nondetBinding: (QuintDef.QuintOpDef, QuintEx) => NullaryOpReader[TBuilderInstruction] = {
+  private val nondetBinding: (QuintDef.QuintOpDef, QuintEx) => ContextReader[TBuilderInstruction] = {
     case (QuintDef.QuintOpDef(_, name, "nondet", QuintApp(id, "oneOf", Seq(domain))), scope) =>
       val elemType = typeConv.convert(types(id).typ)
       val tlaName = tla.name(name, elemType)
@@ -663,7 +704,7 @@ class Quint(quintOutput: QuintOutput) {
       throw new QuintIRParseError(s"nondet keyword used to bind invalid value ${invalidValue}")
   }
 
-  private val opDefConverter: QuintDef.QuintOpDef => NullaryOpReader[(TBuilderOperDeclInstruction, Option[String])] = {
+  private val opDefConverter: QuintDef.QuintOpDef => ContextReader[(TBuilderOperDeclInstruction, Option[String])] = {
     case QuintDef.QuintOpDef(_, name, _, expr) =>
       (expr match {
         // Parameterized operators are defined in Quint using Lambdas
@@ -679,7 +720,7 @@ class Quint(quintOutput: QuintOutput) {
       }
   }
 
-  def tlaExpression(qEx: QuintEx): NullaryOpReader[TBuilderInstruction] =
+  def tlaExpression(qEx: QuintEx): ContextReader[TBuilderInstruction] =
     qEx match {
       // scalar values don't need to read anything
       case QuintBool(_, b) => Reader(_ => tla.bool(b))
@@ -694,8 +735,8 @@ class Quint(quintOutput: QuintOutput) {
           // general case: some other name
           case _ =>
             val t = typeConv.convert(types(id).typ)
-            Reader { nullaryOpNames =>
-              if (nullaryOpNames.contains(name)) {
+            Reader { ctx =>
+              if (ctx.nullaryOps.contains(name)) {
                 tla.appOp(tla.name(name, OperT1(Seq(), t)))
               } else {
                 tla.name(name, t)
@@ -707,10 +748,10 @@ class Quint(quintOutput: QuintOutput) {
       case QuintLet(_, opDef, expr) =>
         opDefConverter(opDef).flatMap { case (tlaOpDef, nullaryName) =>
           tlaExpression(expr)
-            .local { (names: Set[String]) =>
+            .local { (ctx: Context) =>
               nullaryName match {
-                case None    => names
-                case Some(n) => names + n
+                case None    => ctx
+                case Some(n) => ctx.addNullaryOpName(n)
               }
             }
             .map(tlaExpr => tla.letIn(tlaExpr, tlaOpDef))
@@ -722,13 +763,13 @@ class Quint(quintOutput: QuintOutput) {
       case app: QuintApp => tlaApplication(app)
     }
 
-  // `tlaDef(quintDef)` is a NullaryOpReader that can be run to obtain a value `Some((maybeName, tlaDecl))`
+  // `tlaDef(quintDef)` is a ContextReader that can be run to obtain a value `Some((maybeName, tlaDecl))`
   // where `tlaDecl` is derived from the given `quintDef`, and `maybeName` is `Some(n)` when the `quintDef`
   // defines a nullary operator named `n`, or  `None` when `quintDef` is not a nullary operator definition.
   // If the `quintDef` is not convertable (e.g., a quint type definition), then the outer value is `None`.
-  def tlaDef(quintDef: QuintDef): NullaryOpReader[Option[(Option[String], TlaDecl)]] = {
+  def tlaDef(quintDef: QuintDef): ContextReader[Option[(Option[String], TlaDecl)]] = {
     import QuintDef._
-    Reader(nullaryOps =>
+    Reader(ctx =>
       quintDef match {
         // We don't currently support type definitions in the Apalache IR:
         // all compound types are expected to be inlined.
@@ -738,7 +779,7 @@ class Quint(quintOutput: QuintOutput) {
         case QuintConst(id, name, _) => Some(None, TlaConstDecl(name)(typeTagOfId(id)))
         case QuintVar(id, name, _)   => Some(None, TlaVarDecl(name)(typeTagOfId(id)))
         case d @ QuintAssume(_, name, quintEx) =>
-          val tlaEx = build(tlaExpression(quintEx).run(nullaryOps))
+          val tlaEx = build(tlaExpression(quintEx).run(ctx))
           val definedName = Option.unless(d.isUnnamed)(name)
           // assume declarations have no entry in the type map, and are always typed bool
           Some(None, TlaAssumeDecl(definedName, tlaEx)(Typed(BoolT1)))
@@ -746,7 +787,9 @@ class Quint(quintOutput: QuintOutput) {
           // We don't currently support run definitions
           None
         case op: QuintOpDef =>
-          val (tlaInstruction, maybeName) = opDefConverter(op).run(nullaryOps)
+          // If we are entering into the init predicate, mark that in the context
+          val ctx0 = ctx.copy(isInit = (op.name == quintInitName))
+          val (tlaInstruction, maybeName) = opDefConverter(op).run(ctx0)
           val tlaDecl =
             try {
               build(tlaInstruction)
@@ -764,26 +807,26 @@ class Quint(quintOutput: QuintOutput) {
   def tlaModule(module: QuintModule): Try[TlaModule] = for {
     declarations <- Try {
       // For each quint declaration, we need to try converting it to
-      // a TlaDecl, and if it is a nullary operator, we need to add its
-      // name to our set of nullary operators.
-      // See the comment on `NullaryOpReader` for an explanation of the latter.
-      val accumulatedNullarOpNames = Set[String]()
+      // a TlaDecl. Additionally, we need to update the context such that
+      //
+      // - if it is a nullary operator, we need to add its name to our set of nullary operators
+      // - if it is the init predicate, we record that
       val accumulatedTlaDecls = List[TlaDecl]()
       // Translate all definitions from the quint module
       module.declarations
-        .foldLeft((accumulatedNullarOpNames, accumulatedTlaDecls)) {
+        .foldLeft((Context.empty, accumulatedTlaDecls)) {
           // Accumulate the converted definition and the name of the operator, of it is nullary
-          case ((nullaryOps, tlaDecls), quintDef) =>
-            tlaDef(quintDef).run(nullaryOps) match {
+          case ((ctx, tlaDecls), quintDef) =>
+            tlaDef(quintDef).run(ctx) match {
               case None =>
                 // Couldn't convert the declaration (e.g., for a type declaration) so ignore it
-                (nullaryOps, tlaDecls)
+                (ctx, tlaDecls)
               case Some((None, tlaDecl)) =>
                 // Converted a non-nullary operator declaration
-                (nullaryOps, tlaDecl :: tlaDecls)
+                (ctx, tlaDecl :: tlaDecls)
               case Some((Some(nullOp), tlaDecl)) =>
                 // Converted a nullary operator declaration, record the nullary op name
-                (nullaryOps + nullOp, tlaDecl :: tlaDecls)
+                (ctx.addNullaryOpName(nullOp), tlaDecl :: tlaDecls)
             }
         }
         ._2 // Just take the resulting TlaDecls
