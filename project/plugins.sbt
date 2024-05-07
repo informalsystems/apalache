@@ -18,7 +18,7 @@ addSbtPlugin("com.thesamet" % "sbt-protoc" % "1.0.6")
 addSbtPlugin("com.github.sbt" % "sbt-unidoc" % "0.5.0")
 
 // See https://github.com/scalapb/zio-grpc/blob/master/examples/routeguide/project/plugins.sbt
-val zioGrpcVersion = "0.5.3"
+val zioGrpcVersion = "0.6.2"
 libraryDependencies ++= Seq(
     "com.thesamet.scalapb.zio-grpc" %% "zio-grpc-codegen" % zioGrpcVersion,
     "com.thesamet.scalapb" %% "compilerplugin" % "0.11.15",
