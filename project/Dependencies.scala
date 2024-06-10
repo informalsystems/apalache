@@ -27,7 +27,7 @@ object Dependencies {
     val logbackClassic = "ch.qos.logback" % "logback-classic" % logbackVersion
     val logbackCore = "ch.qos.logback" % "logback-core" % logbackVersion
     val logging = "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5"
-    val pureConfig = "com.github.pureconfig" %% "pureconfig" % "0.17.6"
+    val pureConfig = "com.github.pureconfig" %% "pureconfig" % "0.17.7"
     val scalaParserCombinators = "org.scala-lang.modules" %% "scala-parser-combinators" % "2.3.0"
     val scalaCollectionContrib = "org.scala-lang.modules" %% "scala-collection-contrib" % "0.3.0"
     val scalaz = "org.scalaz" %% "scalaz-core" % "7.3.5"
