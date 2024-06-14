@@ -21,7 +21,7 @@ object Dependencies {
     val commonsBeanutils =
       "commons-beanutils" % "commons-beanutils" % "1.9.4" // Apparently an untracked dependency of commonsConfiguration2
     val commonsConfiguration2 = "org.apache.commons" % "commons-configuration2" % "2.9.0"
-    val commonsIo = "commons-io" % "commons-io" % "2.15.1"
+    val commonsIo = "commons-io" % "commons-io" % "2.16.1"
     val guice = "com.google.inject" % "guice" % "7.0.0"
     val kiama = "org.bitbucket.inkytonik.kiama" %% "kiama" % "2.5.1"
     val logbackClassic = "ch.qos.logback" % "logback-classic" % logbackVersion
