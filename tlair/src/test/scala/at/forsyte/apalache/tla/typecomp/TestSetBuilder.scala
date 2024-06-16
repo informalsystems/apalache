@@ -292,7 +292,7 @@ class TestSetBuilder extends BuilderTest {
                   builder.name(s"x$i", ti),
                   builder.name(s"S$i", InvalidTypeMethods.notSet),
               )
-            }
+            },
         )
 
     }
@@ -441,7 +441,7 @@ class TestSetBuilder extends BuilderTest {
           ts.zipWithIndex.map { case ((ti, _), i) =>
             builder.name(s"x$i", ti) ->
               builder.name(s"S$i", InvalidTypeMethods.notSet)
-          }
+          },
       )
     }
 
