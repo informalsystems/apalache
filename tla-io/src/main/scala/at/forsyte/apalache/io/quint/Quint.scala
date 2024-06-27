@@ -655,9 +655,13 @@ class Quint(quintOutput: QuintOutput) {
 
   // Convert Quint's nondet variable binding
   //
-  //   val nondet name = oneOf(domain); scope
+  //   nondet name = oneOf(domain); scope
   //   ~~>
   //   \E name \in domain: scope
+  //
+  //   nondet name = generate(sz, typeSet); scope
+  //   ~~>
+  //   \E name \in { Apalache!Gen(sz) }: scope
   private val nondetBinding: (QuintDef.QuintOpDef, QuintEx) => NullaryOpReader[TBuilderInstruction] = {
     case (QuintDef.QuintOpDef(_, name, "nondet", QuintApp(id, "oneOf", Seq(domain))), scope) =>
       val elemType = typeConv.convert(types(id).typ)
@@ -666,6 +670,19 @@ class Quint(quintOutput: QuintOutput) {
         tlaDomain <- tlaExpression(domain)
         tlaScope <- tlaExpression(scope)
       } yield tla.exists(tlaName, tlaDomain, tlaScope)
+
+    case (QuintDef.QuintOpDef(_, name, "nondet", QuintApp(id, "generate", Seq(bound, _))), scope) =>
+      val elemType = typeConv.convert(types(id).typ)
+      val boundIntConst = intFromExpr(bound)
+      if (boundIntConst.isEmpty) {
+        throw new QuintIRParseError(s"nondet $name = generate($bound) ... expects an integer constant")
+      }
+      val genExpr = tla.enumSet(tla.gen(boundIntConst.get, elemType))
+      val tlaName = tla.name(name, elemType)
+      for {
+        tlaScope <- tlaExpression(scope)
+      } yield tla.exists(tlaName, genExpr, tlaScope)
+
     case invalidValue =>
       throw new QuintIRParseError(s"nondet keyword used to bind invalid value ${invalidValue}")
   }
@@ -804,4 +821,14 @@ class Quint(quintOutput: QuintOutput) {
         .reverse // Return the declarations to their original order
     }
   } yield TlaModule(module.name, declarations)
+
+  private def intFromExpr(expr: QuintEx): Option[BigInt] = {
+    expr match {
+      case QuintInt(_, value) =>
+        Some(value)
+
+      case _ =>
+        None
+    }
+  }
 }
