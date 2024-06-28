@@ -8,7 +8,7 @@ import sbt._
 // See https://www.scala-sbt.org/1.x/docs/Organizing-Build.html#Tracking+dependencies+in+one+place
 object Dependencies {
 
-  lazy val zioVersion = "1.0.18"
+  lazy val zioVersion = "2.1.5"
 
   object Deps {
     // Versions
